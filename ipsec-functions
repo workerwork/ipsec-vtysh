@@ -1,0 +1,653 @@
+#!/bin/bash -
+#ipsec-functions
+
+function update_cert()
+{
+	local dir_cert="$1"
+	[[ ! -d ${dir_cert}/cacerts ]] && mkdir -p ${dir_cert}/cacerts
+	[[ ! -d ${dir_cert}/certs ]] && mkdir -p ${dir_cert}/certs
+	[[ ! -d ${dir_cert}/private ]] && mkdir -p ${dir_cert}/private
+	cd $dir_cert
+	ipsec pki --gen --outform der > caKey.der
+	ipsec pki --self --dateform %Y-%m-%d-%H:%M:%S \
+		--not-before 1950-3-3-3:3:3 --not-after 2030-3-3-3:3:3 \
+		--in caKey.der --dn "C=CN, O=baicells, CN=CA" --ca > caCert.der
+	ipsec pki --gen --outform der > serverKey.der
+	ipsec pki --pub --in serverKey.der | ipsec pki --issue --dateform %Y-%m-%d-%H:%M:%S \
+		--not-before 1950-3-3-3:3:3 --not-after 2030-3-3-3:3:3 \
+		--cacert  caCert.der --cakey caKey.der --dn "C=CN, O=baicells, CN=server" > serverCert.der
+	ipsec pki --gen --outform der > clientKey.der
+	ipsec pki --pub --in clientKey.der | ipsec pki --issue --dateform %Y-%m-%d-%H:%M:%S \
+		--not-before 1950-3-3-3:3:3 --not-after 2030-3-3-3:3:3 \
+		--cacert  caCert.der --cakey caKey.der --dn "C=CN, O=baicells, CN=client" > clientCert.der
+	cp -rf caKey.der caCert.der ${dir_cert}/cacerts
+	cp -rf serverCert.der clientCert.der ${dir_cert}/certs
+	cp -rf serverKey.der clientKey.der ${dir_cert}/private
+	rm -rf *.der
+}
+
+function show_cert()
+{
+	local dir_cert="$1"
+	[[ ! -d ${dir_cert}/certs ]] && mkdir -p ${dir_cert}/certs
+	ls ${dir_cert}/certs 2>/dev/null
+}
+
+function backup_cert()
+{
+	local dir_cert="$1"
+	[[ ! -d ${dir_cert}/certs ]] && mkdir -p ${dir_cert}/certs
+	sz ${dir_cert}/certs/*.der
+}
+
+function create_conn()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local conn_file="$dir_conf/${conn_name}.conf"
+    if [[ ! $(grep "$conn_name" $conn_file) ]] &>/dev/null;then
+        echo "conn $conn_name" > $conn_file
+    fi
+}
+
+function del_conn()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    if [[ $conn_name == "all" ]];then
+        conn_name="*"
+    fi
+	local conn_file="$dir_conf/${conn_name}.conf"
+	rm -rf $conn_file &>/dev/null	
+}
+
+function show_conn()
+{
+	local dir_conf="$1"
+	local _type="$2"
+	local conn_name="$3"
+	if [[ $_type == "configure" ]];then
+		if [[ $conn_name == "all" ]];then
+			conn_name="*"
+		fi
+		local conn_file="$dir_conf/${conn_name}.conf"
+		cat $conn_file 2>/dev/null
+	elif [[ $_type == "status" ]];then
+		echo "$(ipsec status)"
+	fi
+}
+
+function add_local_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local ip_addr_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local ip_addr_file="$dir_conf/${conn_name}.local_addr"
+	echo $ip_addr_add >> $ip_addr_file
+    mv -f $ip_addr_file ${ip_addr_file}_tmp
+    cat ${ip_addr_file}_tmp | sort -u > $ip_addr_file && rm -rf ${ip_addr_file}_tmp
+    local ip_addr_new="$(awk '{printf"%s,",$0}' $ip_addr_file | awk '{print substr($0,1,length-1)}')"
+    if [[ $(grep "left=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(left=\).*/\1$ip_addr_new/" $conn_file
+	else
+        echo "    left=$ip_addr_add" >> $conn_file
+	fi
+}
+
+function del_local_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local ip_addr_del="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local ip_addr_file="$dir_conf/${conn_name}.local_addr"	
+    if [[ $ip_addr_del == "all" ]];then
+        sed -i '/left=/d' $conn_file
+        rm -rf $ip_addr_file
+    else
+		if [[ $(grep ^$ip_addr_del$ $ip_addr_file) ]] &>/dev/null;then
+		    sed -i "/^$ip_addr_del$/d" $ip_addr_file
+            local ip_addr_new="$(awk '{printf"%s,",$0}' $ip_addr_file | awk '{print substr($0,1,length-1)}')"
+            if [[ $(grep "left=" $conn_file) ]] &>/dev/null;then
+                sed -i "s/\(left=\).*/\1$ip_addr_new/" $conn_file
+	        else
+                echo "no ip addr"
+	        fi
+        else
+            echo "no ip addr"
+        fi
+	fi
+}
+
+function show_local_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local ip_addr_file="$dir_conf/${conn_name}.local_addr"
+    cat $ip_addr_file 2>/dev/null	
+}
+
+function add_remote_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local ip_addr_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local ip_addr_file="$dir_conf/${conn_name}.remote_addr"
+    echo $ip_addr_add >> $ip_addr_file
+    mv -f $ip_addr_file ${ip_addr_file}_tmp
+    cat ${ip_addr_file}_tmp | sort -u > $ip_addr_file && rm -rf ${ip_addr_file}_tmp
+    local ip_addr_new="$(awk '{printf"%s,",$0}' $ip_addr_file | awk '{print substr($0,1,length-1)}')"
+    if [[ $(grep "right=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(right=\).*/\1$ip_addr_new/" $conn_file
+	else
+        echo "    right=$ip_addr_add" >> $conn_file
+	fi
+}
+
+function del_remote_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local ip_addr_del="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local ip_addr_file="$dir_conf/${conn_name}.local_addr"
+    if [[ $ip_addr_del == "all" ]];then
+        sed -i '/right=/d' $conn_file
+        rm -rf $ip_addr_file
+    else
+		if [[ $(grep ^$ip_addr_del$ $ip_addr_file) ]] &>/dev/null;then
+		    sed -i "/^$ip_addr_del$/d" $ip_addr_file
+            local ip_addr_new="$(awk '{printf"%s,",$0}' $ip_addr_file | awk '{print substr($0,1,length-1)}')"
+            if [[ $(grep "right=" $conn_file) ]] &>/dev/null;then
+                sed -i "s/\(right=\).*/\1$ip_addr_new/" $conn_file
+	        else
+                echo "no ip addr"
+	        fi
+        else
+            echo "no ip addr"
+        fi
+	fi
+}
+
+function show_remote_addr()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local ip_addr_file="$dir_conf/${conn_name}.remote_addr"
+    cat $ip_addr_file 2>/dev/null	
+}
+
+function set_local_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local id_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local id_file="$dir_conf/${conn_name}.local_id"
+    echo $id_add > $id_file
+    if [[ $(grep "leftid=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(leftid=\).*/\1$id_add/" $conn_file
+	else
+        echo "    leftid=$id_add" >> $conn_file
+	fi
+}
+
+function unset_local_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local id_file="$dir_conf/${conn_name}.local_id"
+    rm -rf $id_file
+    if [[ $(grep "leftid=" $conn_file) ]] &>/dev/null;then
+        sed -i "/leftid=/d" $conn_file
+	else
+        echo "no id"
+	fi
+}
+
+function show_local_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local id_file="$dir_conf/${conn_name}.local_id"
+    cat $id_file 2>/dev/null
+}
+
+function set_remote_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local id_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local id_file="$dir_conf/${conn_name}.remote_id"
+    echo $id_add > $id_file
+    if [[ $(grep "rightid=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(rightid=\).*/\1$id_add/" $conn_file
+	else
+        echo "    rightid=$id_add" >> $conn_file
+	fi
+}
+
+function unset_remote_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local id_file="$dir_conf/${conn_name}.local_id"
+    rm -rf $id_file
+    if [[ $(grep "rightid=" $conn_file) ]] &>/dev/null;then
+        sed -i "/rightid=/d" $conn_file
+	else
+        echo "no id"
+	fi
+}
+
+function show_remote_id()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local id_file="$dir_conf/${conn_name}.remote_id"
+    cat $id_file 2>/dev/null
+}
+
+function add_local_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local subnet_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local subnet_file="$dir_conf/${conn_name}.local_subnet"
+    echo $subnet_add >> $subnet_file
+    mv -f $subnet_file ${subnet_file}_tmp
+    cat ${subnet_file}_tmp | sort -u > $subnet_file && rm -rf ${subnet_file}_tmp
+    subnet_new="$(awk '{printf"%s,",$0}' $subnet_file | awk '{print substr($0,1,length-1)}')"
+    if [[ $(grep "leftsubnet=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(leftsubnet=\).*/\1$subnet_new/" $conn_file
+	else
+        echo "    leftsubnet=$subnet_add" >> $conn_file
+	fi
+}
+
+function del_local_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local subnet_del="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local subnet_file="$dir_conf/${conn_name}.local_subnet"
+    if [[ $subnet_del == "all" ]];then
+        sed -i '/leftsubnet=/d' $conn_file
+        rm -rf $subnet_file
+    else
+		if [[ $(grep ^$subnet_del$ $subnet_file) ]] &>/dev/null;then
+		    sed -i "/^$subnet_del$/d" $subnet_file
+            local subnet_new="$(awk '{printf"%s,",$0}' $subnet_file | awk '{print substr($0,1,length-1)}')"
+            if [[ $(grep "leftsubnet=" $conn_file) ]] &>/dev/null;then
+                sed -i "s/\(leftsubnet=\).*/\1$subnet_new/" $conn_file
+	        else
+                echo "no subnet"
+	        fi
+        else
+            echo "no subnet"
+        fi
+	fi
+}
+
+function show_local_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local subnet_file="$dir_conf/${conn_name}.local_subnet"
+    cat $subnet_file 2>/dev/null	
+}
+
+function add_remote_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local subnet_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local subnet_file="$dir_conf/${conn_name}.remote_subnet"
+    echo $subnet_add >> $subnet_file
+    mv -f $subnet_file ${subnet_file}_tmp
+    cat ${subnet_file}_tmp | sort -u > $subnet_file && rm -rf ${subnet_file}_tmp
+    local subnet_new="$(awk '{printf"%s,",$0}' $subnet_file | awk '{print substr($0,1,length-1)}')"
+    if [[ $(grep "rightsubnet=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(rightsubnet=\).*/\1$subnet_new/" $conn_file
+	else
+        echo "    rightsubnet=$subnet_add" >> $conn_file
+	fi
+}
+
+function del_remote_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local subnet_del="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local subnet_file="$dir_conf/${conn_name}.remote_subnet"
+    if [[ $subnet_del == "all" ]];then
+        sed -i '/rightsubnet=/d' $conn_file
+        rm -rf $subnet_file
+    else
+		if [[ $(grep ^$subnet_del$ $subnet_file) ]] &>/dev/null;then
+		    sed -i "/^$subnet_del$/d" $subnet_file
+            local subnet_new="$(awk '{printf"%s,",$0}' $subnet_file | awk '{print substr($0,1,length-1)}')"
+            if [[ $(grep "rightsubnet=" $conn_file) ]] &>/dev/null;then
+                sed -i "s/\(rightsubnet=\).*/\1$subnet_new/" $conn_file
+	        else
+                echo "no subnet"
+	        fi
+        else
+            echo "no subnet"
+        fi
+	fi
+}
+
+function show_remote_subnet()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local subnet_file="$dir_conf/${conn_name}.remote_subnet"
+    cat $subnet_file 2>/dev/null	
+}
+
+function set_local_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local sourceip_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local sourceip_file="$dir_conf/${conn_name}.local_sourceip"
+    echo $sourceip_add > $sourceip_file
+    if [[ $(grep "leftsourceip=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(leftsourceip=\).*/\1$sourceip_add/" $conn_file
+	else
+        echo "    leftsourceip=$sourceip_add" >> $conn_file
+	fi
+}
+
+function unset_local_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local sourceip_file="$dir_conf/${conn_name}.local_sourceip"
+    rm -rf $sourceip_file
+    if [[ $(grep "leftsourceip=" $conn_file) ]] &>/dev/null;then
+        sed -i "/leftsourceip=/d" $conn_file
+	else
+        echo "no sourceip"
+	fi
+}
+
+function show_local_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local sourceip_file="$dir_conf/${conn_name}.local_sourceip"
+    cat $sourceip_file 2>/dev/null
+}
+
+function set_remote_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local sourceip_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local sourceip_file="$dir_conf/${conn_name}.remote_sourceip"
+    echo $sourceip_add > $sourceip_file
+    if [[ $(grep "rightsourceip=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(rightsourceip=\).*/\1$sourceip_add/" $conn_file
+	else
+        echo "    rightsourceip=$sourceip_add" >> $conn_file
+	fi
+}
+
+function unset_remote_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local sourceip_file="$dir_conf/${conn_name}.remote_sourceip"
+    rm -rf $sourceip_file
+    if [[ $(grep "rightsourceip=" $conn_file) ]] &>/dev/null;then
+        sed -i "/rightsourceip=/d" $conn_file
+	else
+        echo "no sourceip"
+	fi
+}
+
+function show_remote_sourceip()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local sourceip_file="$dir_conf/${conn_name}.remote_sourceip"
+    cat $sourceip_file 2>/dev/null
+}
+
+function set_local_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local auth_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auth_file="$dir_conf/${conn_name}.local_auth"
+    echo $auth_add > $auth_file
+    if [[ $(grep "leftauth=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(leftauth=\).*/\1$auth_add/" $conn_file
+	else
+        echo "    leftauth=$auth_add" >> $conn_file
+	fi
+}
+
+function unset_local_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auth_file="$dir_conf/${conn_name}.local_auth"
+    rm -rf $auth_file
+    if [[ $(grep "leftauth=" $conn_file) ]] &>/dev/null;then
+        sed -i "/leftauth=/d" $conn_file
+	else
+        echo "no auth"
+	fi
+}
+
+function show_local_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local auth_file="$dir_conf/${conn_name}.local_auth"
+    cat $auth_file 2>/dev/null
+}
+
+function set_remote_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local auth_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auth_file="$dir_conf/${conn_name}.remote_auth"
+    echo $auth_add > $auth_file
+    if [[ $(grep "rightauth=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(rightauth=\).*/\1$auth_add/" $conn_file
+	else
+        echo "    rightauth=$auth_add" >> $conn_file
+	fi
+}
+
+function unset_remote_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auth_file="$dir_conf/${conn_name}.remote_auth"
+    rm -rf $auth_file
+    if [[ $(grep "rightauth=" $conn_file) ]] &>/dev/null;then
+        sed -i "/rightauth=/d" $conn_file
+	else
+        echo "no auth"
+	fi
+}
+
+function show_remote_auth()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local auth_file="$dir_conf/${conn_name}.remote_auth"
+    cat $auth_file 2>/dev/null
+}
+
+function set_auto()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local auto_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auto_file="$dir_conf/${conn_name}.auto"
+    echo $auto_add > $auto_file
+    if [[ $(grep "auto=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(auto=\).*/\1$auto_add/" $conn_file
+	else
+        echo "    auto=$auto_add" >> $conn_file
+	fi
+}
+
+function unset_auto()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local auto_file="$dir_conf/${conn_name}.auto"
+    rm -rf $auto_file
+    if [[ $(grep "auto=" $conn_file) ]] &>/dev/null;then
+        sed -i "/auto=/d" $conn_file
+	else
+        echo "no auto"
+	fi
+}
+
+function show_auto()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local auto_file="$dir_conf/${conn_name}.auto"
+    cat $auto_file 2>/dev/null
+}
+
+function set_dpdaction()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local dpdaction_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpdaction_file="$dir_conf/${conn_name}.dpdaction"
+    echo $dpdaction_add > $dpdaction_file
+    if [[ $(grep "dpdaction=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(dpdaction=\).*/\1$dpdaction_add/" $conn_file
+	else
+        echo "    dpdaction=$dpdaction_add" >> $conn_file
+	fi
+}
+
+function unset_dpdaction()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpdaction_file="$dir_conf/${conn_name}.dpdaction"
+    rm -rf $dpdaction_file
+    if [[ $(grep "dpdaction=" $conn_file) ]] &>/dev/null;then
+        sed -i "/dpdaction=/d" $conn_file
+	else
+        echo "no dpdaction"
+	fi
+}
+
+function show_dpdaction()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local dpdaction_file="$dir_conf/${conn_name}.dpdaction"
+    cat $dpdaction_file 2>/dev/null
+}
+
+function set_dpddelay()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local dpddelay_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpddelay_file="$dir_conf/${conn_name}.dpddelay"
+    echo $dpddelay_add > $dpddelay_file
+    if [[ $(grep "dpddelay=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(dpddelay=\).*/\1$dpddelay_add/" $conn_file
+	else
+        echo "    dpddelay=$dpddelay_add" >> $conn_file
+	fi
+}
+
+function unset_dpddelay()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpddelay_file="$dir_conf/${conn_name}.dpddelay"
+    rm -rf $dpddelay_file
+    if [[ $(grep "dpddelay=" $conn_file) ]] &>/dev/null;then
+        sed -i "/dpddelay=/d" $conn_file
+	else
+        echo "no dpddelay"
+	fi
+}
+
+function show_dpddelay()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local dpddelay_file="$dir_conf/${conn_name}.dpddelay"
+    cat $dpddelay_file 2>/dev/null
+}
+
+function set_dpdtimeout()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local dpdtimeout_add="$3"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpdtimeout_file="$dir_conf/${conn_name}.dpdtimeout"
+    echo $dpdtimeout_add > $dpdtimeout_file
+    if [[ $(grep "dpdtimeout=" $conn_file) ]] &>/dev/null;then
+        sed -i "s/\(dpdtimeout=\).*/\1$dpdtimeout_add/" $conn_file
+	else
+        echo "    dpdtimeout=$dpdtimeout_add" >> $conn_file
+	fi
+}
+
+function unset_dpdtimeout()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+	local conn_file="$dir_conf/${conn_name}.conf"
+	local dpdtimeout_file="$dir_conf/${conn_name}.dpdtimeout"
+    rm -rf $dpdtimeout_file
+    if [[ $(grep "dpdtimeout=" $conn_file) ]] &>/dev/null;then
+        sed -i "/dpdtimeout=/d" $conn_file
+	else
+        echo "no dpdtimeout"
+	fi
+}
+
+function show_dpdtimeout()
+{
+	local dir_conf="$1"
+	local conn_name="$2"
+    local dpdtimeout_file="$dir_conf/${conn_name}.dpdtimeout"
+    cat $dpdtimeout_file 2>/dev/null
+}
+
